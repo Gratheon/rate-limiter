@@ -9,18 +9,83 @@ This library is designed to be integrated into various services within the `grat
 - **Allows Bursts:** Tokens accumulate during low-traffic periods, enabling high burst capacity when needed.
 - **Atomic Operation:** Uses Redis Lua scripts to ensure read, calculation, and write-back occur in a single atomic step, which is essential for accuracy in horizontally scaled (distributed) applications.
 
-## How it works: Token Bucket Diagram
+## Architecture & Flow
 
-The `TokenBucketRateLimiter` uses the Token Bucket algorithm, enforced atomically via Redis Lua scripting.
+### Sequence Diagram
+
+The following diagram shows how the rate limiter integrates into a typical API service flow:
 
 ```mermaid
-graph TD
-    A[Client Request] --> B{Is a token available?}
-    B -- Yes --> C[Remove 1 Token]
-    C --> D[Allow Request]
-    B -- No --> E[Reject Request 429]
-    D --> F[Bucket Refills Continuously]
-    E --> F
+sequenceDiagram
+    participant Client
+    participant API as API Service<br/>(Express/Fastify)
+    participant RL as TokenBucketRateLimiter
+    participant Redis
+
+    Note over Client,Redis: First Request (Script Loading)
+    Client->>API: HTTP Request<br/>POST /api/data<br/>Header: user-id: 123
+    API->>RL: consume("user:123")
+    RL->>Redis: SCRIPT LOAD<br/>(Lua token bucket script)
+    Redis-->>RL: sha1 hash
+    RL->>Redis: EVALSHA sha1<br/>key: "rate:user:123"<br/>capacity: 10<br/>refillRate: 0.166<br/>timestamp: 1678886400
+    Redis->>Redis: Atomically check &<br/>decrement token
+    Redis-->>RL: [1, 9]<br/>(allowed, remaining)
+    RL-->>API: true
+    API->>API: Process business logic
+    API-->>Client: 200 OK<br/>X-RateLimit-Remaining: 9
+
+    Note over Client,Redis: Subsequent Requests
+    Client->>API: HTTP Request #2<br/>same user
+    API->>RL: consume("user:123")
+    RL->>Redis: EVALSHA sha1<br/>(script already cached)
+    Redis-->>RL: [1, 8]
+    RL-->>API: true
+    API-->>Client: 200 OK
+
+    Note over Client,Redis: Rate Limit Exceeded
+    loop 8 more requests
+        Client->>API: Requests #3-10
+        API->>RL: consume()
+        RL->>Redis: EVALSHA
+        Redis-->>RL: [1, remaining]
+        RL-->>API: true
+    end
+    Client->>API: Request #11<br/>(bucket empty)
+    API->>RL: consume("user:123")
+    RL->>Redis: EVALSHA sha1
+    Redis-->>RL: [0, 0]<br/>(denied, 0 remaining)
+    RL-->>API: false
+    API-->>Client: 429 Too Many Requests<br/>Retry-After: 6
+```
+
+### Token Bucket State Flow
+
+```mermaid
+stateDiagram-v2
+    [*] --> CheckToken: consume(userId)
+    
+    CheckToken --> LoadScript: First call?
+    LoadScript --> ExecuteScript: Cache SHA
+    CheckToken --> ExecuteScript: Script cached
+    
+    ExecuteScript --> Allowed: tokens > 0
+    ExecuteScript --> Denied: tokens = 0
+    
+    Allowed --> [*]: return true
+    Denied --> [*]: return false
+    
+    note right of LoadScript
+        Lua script loaded once
+        per Redis connection
+    end note
+    
+    note right of ExecuteScript
+        Atomic operation:
+        1. Get current tokens
+        2. Calculate refills
+        3. Check availability
+        4. Decrement if allowed
+    end note
 ```
 
 ## Installation
