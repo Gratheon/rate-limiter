@@ -104,7 +104,49 @@ First, install development dependencies:
 npm install
 ```
 
-Then, run the tests using Jest:
+### Unit Tests
+
+Unit tests use mocked Redis clients and run quickly without external dependencies:
+
+```bash
+npm run test:unit
+```
+
+### Integration Tests
+
+Integration tests require a **running Redis instance**. 
+
+**Start Redis** (using Docker):
+
+```bash
+# Without password
+docker run -d -p 6379:6379 redis:latest
+
+# With password
+docker run -d -p 6379:6379 redis:latest redis-server --requirepass mypassword
+```
+
+Or use an existing Redis instance by setting the `REDIS_URL` environment variable:
+
+```bash
+# Without password
+export REDIS_URL=redis://localhost:6379
+
+# With password
+export REDIS_URL=redis://:mypassword@localhost:6379
+```
+
+**Run integration tests:**
+
+```bash
+npm run test:integration
+```
+
+The default Redis URL is `redis://:pass@localhost:5200` (matches the gratheon development environment).
+
+### All Tests
+
+Run both unit and integration tests:
 
 ```bash
 npm test
