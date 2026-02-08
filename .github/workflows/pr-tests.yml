@@ -39,7 +39,7 @@ jobs:
     
     strategy:
       matrix:
-        redis-version: ['6', '7', '8']
+        redis-version: ['6', '7', 'latest']
         include:
           - redis-version: '6'
             redis-port: 6380
@@ -47,23 +47,22 @@ jobs:
           - redis-version: '7'
             redis-port: 6381
             redis-image: redis:7-alpine
-          - redis-version: '8'
+          - redis-version: 'latest'
             redis-port: 6382
-            redis-image: redis:8-rc-alpine
+            redis-image: redis:alpine
       fail-fast: false
     
     services:
       redis:
         image: ${{ matrix.redis-image }}
         options: >-
-          --health-cmd "redis-cli -a pass ping"
+          --health-cmd "redis-cli ping"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+          redis-server --requirepass pass
         ports:
           - ${{ matrix.redis-port }}:6379
-        env:
-          REDIS_PASSWORD: pass
     
     steps:
       - name: Checkout code

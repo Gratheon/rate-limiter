@@ -27,10 +27,10 @@ services:
       timeout: 3s
       retries: 5
 
-  # Redis 8.x - Edge/Latest
-  redis-8:
-    image: redis:8-rc-alpine
-    container_name: redis-test-8
+  # Redis latest - Edge/Latest version
+  redis-latest:
+    image: redis:alpine
+    container_name: redis-test-latest
     ports:
       - "6382:6379"
     command: redis-server --requirepass pass
