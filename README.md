@@ -15,12 +15,12 @@ The `TokenBucketRateLimiter` uses the Token Bucket algorithm, enforced atomicall
 
 ```mermaid
 graph TD
-    A[Client Request] --> B{Is a token available?};
-    B -- Yes --> C[Remove 1 Token];
-    C --> D[Allow Request];
-    B -- No --> E[Reject Request (429)];
-    D --> F[Bucket Refills Continuously];
-    E --> F;
+    A[Client Request] --> B{Is a token available?}
+    B -- Yes --> C[Remove 1 Token]
+    C --> D[Allow Request]
+    B -- No --> E[Reject Request 429]
+    D --> F[Bucket Refills Continuously]
+    E --> F
 ```
 
 ## Installation
