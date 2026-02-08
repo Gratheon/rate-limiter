@@ -5,8 +5,8 @@ import { TokenBucketRateLimiter } from "./TokenBucketRateLimiter";
 // Mock implementation for the Redis Client used in unit tests
 const mockRedisClient = {
   // Mock only the evalSha and scriptLoad methods used by the limiter
-  evalSha: jest.fn(),
-  scriptLoad: jest.fn().mockResolvedValue('MOCKED_SHA'), // Mock script loading
+  evalSha: jest.fn(() => Promise.resolve([1, 4])) as any, // Mock script response: allowed, remaining
+  scriptLoad: jest.fn(() => Promise.resolve('MOCKED_SHA')) as any, // Mock script loading
 } as any; // Use 'any' to bypass strict CommandSignature types
 
 describe("TokenBucketRateLimiter Unit Tests (Mocked Redis)", () => {
