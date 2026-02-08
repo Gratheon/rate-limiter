@@ -9,14 +9,15 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
 
   beforeAll(async () => {
     // Connect to the actual Redis instance
-    // Assumes Redis is running on localhost:6379 or uses REDIS_URL env var
-    const redisUrl = process.env.REDIS_URL || "redis://:pass@localhost:5200";
+    // Uses REDIS_URL env var (e.g., redis://:pass@localhost:6380)
+    // Default fallback for local development
+    const redisUrl = process.env.REDIS_URL || "redis://:pass@localhost:6379";
     redisClient = createClient({ 
       url: redisUrl
     }) as RedisClientType;
     
     await redisClient.connect();
-    console.log("Connected to Redis for integration tests");
+    console.log(`Connected to Redis for integration tests at ${redisUrl}`);
   }, 10000);
 
   beforeEach(async () => {
