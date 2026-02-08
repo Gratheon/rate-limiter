@@ -9,13 +9,41 @@ This library is designed to be integrated into various services within the `grat
 - **Allows Bursts:** Tokens accumulate during low-traffic periods, enabling high burst capacity when needed.
 - **Atomic Operation:** Uses Redis Lua scripts to ensure read, calculation, and write-back occur in a single atomic step, which is essential for accuracy in horizontally scaled (distributed) applications.
 
+## How it works: Token Bucket Diagram
+
+The `TokenBucketRateLimiter` uses the Token Bucket algorithm, enforced atomically via Redis Lua scripting.
+
+```mermaid
+graph TD
+    A[Client Request] --> B{Is a token available?};
+    B -- Yes --> C[Remove 1 Token];
+    C --> D[Allow Request];
+    B -- No --> E[Reject Request (429)];
+    D --> F[Bucket Refills Continuously];
+    E --> F;
+```
+
 ## Installation
 
-\`\`\`bash
+```bash
 npm install @gratheon/rate-limiter redis
-\`\`\`
+```
 
 *(Note: The actual package name may need to be scoped to `@gratheon/rate-limiter` upon publishing.)*
+
+## Running Tests
+
+First, install development dependencies:
+
+```bash
+npm install
+```
+
+Then, run the tests using Jest:
+
+```bash
+npm test
+```
 
 ## Usage
 
@@ -23,7 +51,7 @@ npm install @gratheon/rate-limiter redis
 
 First, you need a connected Redis client.
 
-\`\`\`typescript
+```typescript
 import { createClient } from 'redis';
 import { TokenBucketRateLimiter } from './src/TokenBucketRateLimiter'; // or '@gratheon/rate-limiter'
 
@@ -40,13 +68,13 @@ const rateLimiter = new TokenBucketRateLimiter({
   refillRate: 10 / 60, // 0.166 tokens per second (10 tokens / 60 seconds)
   prefix: 'api:user' // Prefix for Redis keys (e.g., api:user:123)
 });
-\`\`\`
+```
 
 ### Consuming a Token
 
-Use the \`consume\` method inside your middleware or route handler.
+Use the `consume` method inside your middleware or route handler.
 
-\`\`\`typescript
+```typescript
 async function handleRequest(userId: string): Promise<Response> {
   const allowed = await rateLimiter.consume(userId);
 
@@ -61,4 +89,4 @@ async function handleRequest(userId: string): Promise<Response> {
   // ...
   return new Response('OK');
 }
-\`\`\`
+```
