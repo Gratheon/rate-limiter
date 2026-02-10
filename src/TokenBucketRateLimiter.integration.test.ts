@@ -8,7 +8,7 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
   const TEST_KEYS: string[] = [];
 
   beforeAll(async () => {
-    const redisUrl = process.env.REDIS_URL || "redis://:pass@localhost:6379";
+    const redisUrl = process.env.REDIS_URL || "redis://localhost:6379";
     redisClient = createClient({ 
       url: redisUrl
     }) as RedisClientType;
