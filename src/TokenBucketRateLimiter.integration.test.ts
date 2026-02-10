@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from '@jest/globals';
 import { createClient, RedisClientType } from "redis";
-import { TokenBucketRateLimiter } from "./TokenBucketRateLimiter";
+import { TokenBucketRateLimiter, ConsumeResult, RateLimiterError } from "./TokenBucketRateLimiter";
 
 describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
   let redisClient: RedisClientType;
@@ -8,9 +8,6 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
   const TEST_KEYS: string[] = [];
 
   beforeAll(async () => {
-    // Connect to the actual Redis instance
-    // Uses REDIS_URL env var (e.g., redis://:pass@localhost:6380)
-    // Default fallback for local development
     const redisUrl = process.env.REDIS_URL || "redis://:pass@localhost:6379";
     redisClient = createClient({ 
       url: redisUrl
@@ -21,7 +18,6 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
   }, 10000);
 
   beforeEach(async () => {
-    // Clear all test keys before each test
     for (const key of TEST_KEYS) {
       await redisClient.del(key);
     }
@@ -29,12 +25,10 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
   });
 
   afterAll(async () => {
-    // Clean up all test keys
     for (const key of TEST_KEYS) {
       await redisClient.del(key);
     }
     
-    // Disconnect from Redis
     await redisClient.quit();
     console.log("Disconnected from Redis");
   }, 10000);
@@ -46,6 +40,226 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
     }
   };
 
+  describe("Input Validation", () => {
+    it("should throw error for missing redisClient", () => {
+      expect(() => {
+        new TokenBucketRateLimiter({
+          capacity: 10,
+          refillRate: 1,
+          prefix: "test",
+          redisClient: undefined as any,
+        });
+      }).toThrow(RateLimiterError);
+    });
+
+    it("should throw error for invalid capacity", () => {
+      expect(() => {
+        new TokenBucketRateLimiter({
+          capacity: -5,
+          refillRate: 1,
+          prefix: "test",
+          redisClient,
+        });
+      }).toThrow(RateLimiterError);
+
+      expect(() => {
+        new TokenBucketRateLimiter({
+          capacity: 0,
+          refillRate: 1,
+          prefix: "test",
+          redisClient,
+        });
+      }).toThrow(RateLimiterError);
+    });
+
+    it("should throw error for invalid refillRate", () => {
+      expect(() => {
+        new TokenBucketRateLimiter({
+          capacity: 10,
+          refillRate: -1,
+          prefix: "test",
+          redisClient,
+        });
+      }).toThrow(RateLimiterError);
+    });
+
+    it("should throw error for invalid prefix", () => {
+      expect(() => {
+        new TokenBucketRateLimiter({
+          capacity: 10,
+          refillRate: 1,
+          prefix: "",
+          redisClient,
+        });
+      }).toThrow(RateLimiterError);
+    });
+
+    it("should throw error for invalid ttlSeconds", () => {
+      expect(() => {
+        new TokenBucketRateLimiter({
+          capacity: 10,
+          refillRate: 1,
+          prefix: "test",
+          redisClient,
+          ttlSeconds: -1,
+        });
+      }).toThrow(RateLimiterError);
+    });
+  });
+
+  describe("Enhanced API", () => {
+    it("should return detailed consume result with remaining tokens", async () => {
+      const userId = "api-test-user-1";
+      trackKey(userId);
+
+      const limiter = new TokenBucketRateLimiter({
+        capacity: 5,
+        refillRate: 1,
+        prefix: INTEGRATION_PREFIX,
+        redisClient,
+      });
+
+      const result = await limiter.consume(userId);
+      
+      expect(result.allowed).toBe(true);
+      expect(result.remainingTokens).toBe(4);
+      expect(result.retryAfter).toBeUndefined();
+    });
+
+    it("should return retryAfter when rate limited", async () => {
+      const userId = "api-test-user-2";
+      trackKey(userId);
+
+      const limiter = new TokenBucketRateLimiter({
+        capacity: 2,
+        refillRate: 1,
+        prefix: INTEGRATION_PREFIX,
+        redisClient,
+      });
+
+      await limiter.consume(userId);
+      await limiter.consume(userId);
+      const result = await limiter.consume(userId);
+      
+      expect(result.allowed).toBe(false);
+      expect(result.remainingTokens).toBe(0);
+      expect(result.retryAfter).toBeGreaterThan(0);
+    });
+
+    it("should get bucket status without consuming", async () => {
+      const userId = "api-test-user-3";
+      trackKey(userId);
+
+      const limiter = new TokenBucketRateLimiter({
+        capacity: 10,
+        refillRate: 2,
+        prefix: INTEGRATION_PREFIX,
+        redisClient,
+      });
+
+      // Consume some tokens first
+      await limiter.consume(userId);
+      await limiter.consume(userId);
+      await limiter.consume(userId);
+
+      const status = await limiter.getStatus(userId);
+      
+      expect(status.remainingTokens).toBe(7);
+      expect(status.capacity).toBe(10);
+      expect(status.resetTime).toBeDefined();
+    });
+
+    it("should reset bucket", async () => {
+      const userId = "api-test-user-4";
+      trackKey(userId);
+
+      const limiter = new TokenBucketRateLimiter({
+        capacity: 3,
+        refillRate: 1,
+        prefix: INTEGRATION_PREFIX,
+        redisClient,
+      });
+
+      // Exhaust bucket
+      await limiter.consume(userId);
+      await limiter.consume(userId);
+      await limiter.consume(userId);
+      
+      let result = await limiter.consume(userId);
+      expect(result.allowed).toBe(false);
+
+      // Reset bucket
+      const wasDeleted = await limiter.reset(userId);
+      expect(wasDeleted).toBe(true);
+
+      // Should be able to consume again
+      result = await limiter.consume(userId);
+      expect(result.allowed).toBe(true);
+    });
+
+    it("should support batch consume", async () => {
+      const userId = "api-test-user-5";
+      trackKey(userId);
+
+      const limiter = new TokenBucketRateLimiter({
+        capacity: 10,
+        refillRate: 1,
+        prefix: INTEGRATION_PREFIX,
+        redisClient,
+      });
+
+      const result = await limiter.consumeBatch(userId, 3);
+      
+      expect(result.allowed).toBe(true);
+      expect(result.remainingTokens).toBe(7);
+    });
+
+    it("should reject batch consume exceeding capacity", async () => {
+      const userId = "api-test-user-6";
+      trackKey(userId);
+
+      const limiter = new TokenBucketRateLimiter({
+        capacity: 5,
+        refillRate: 1,
+        prefix: INTEGRATION_PREFIX,
+        redisClient,
+      });
+
+      await expect(limiter.consumeBatch(userId, 10)).rejects.toThrow(RateLimiterError);
+    });
+
+    it("should reject invalid batch consume parameters", async () => {
+      const userId = "api-test-user-7";
+      trackKey(userId);
+
+      const limiter = new TokenBucketRateLimiter({
+        capacity: 10,
+        refillRate: 1,
+        prefix: INTEGRATION_PREFIX,
+        redisClient,
+      });
+
+      await expect(limiter.consumeBatch(userId, 0)).rejects.toThrow(RateLimiterError);
+      await expect(limiter.consumeBatch(userId, -1)).rejects.toThrow(RateLimiterError);
+    });
+
+    it("should return config via getConfig", () => {
+      const limiter = new TokenBucketRateLimiter({
+        capacity: 10,
+        refillRate: 2,
+        prefix: "test",
+        redisClient,
+        ttlSeconds: 300,
+      });
+
+      const config = limiter.getConfig();
+      expect(config.capacity).toBe(10);
+      expect(config.refillRate).toBe(2);
+      expect(config.prefix).toBe("test");
+      expect(config.ttlSeconds).toBe(300);
+    });
+  });
+
   describe("Basic Rate Limiting", () => {
     it("should allow a burst of requests up to capacity", async () => {
       const userId = "burst-user-1";
@@ -53,14 +267,13 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
 
       const config = {
         capacity: 5,
-        refillRate: 0, // No refill to prevent race conditions in this test
+        refillRate: 0,
         prefix: INTEGRATION_PREFIX,
         redisClient,
       };
 
       const limiter = new TokenBucketRateLimiter(config);
 
-      // First burst: 5 requests should be allowed
       const results = await Promise.all([
         limiter.consume(userId),
         limiter.consume(userId),
@@ -69,10 +282,10 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
         limiter.consume(userId),
       ]);
 
-      expect(results.filter(r => r === true).length).toBe(5);
+      expect(results.filter((r: ConsumeResult) => r.allowed).length).toBe(5);
       
-      // 6th request should be denied (bucket is empty)
-      expect(await limiter.consume(userId)).toBe(false);
+      const result = await limiter.consume(userId);
+      expect(result.allowed).toBe(false);
     });
 
     it("should deny requests when capacity is exceeded", async () => {
@@ -81,21 +294,19 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
 
       const config = {
         capacity: 3,
-        refillRate: 0.5, // 0.5 tokens per second
+        refillRate: 0.5,
         prefix: INTEGRATION_PREFIX,
         redisClient,
       };
 
       const limiter = new TokenBucketRateLimiter(config);
 
-      // Consume all 3 tokens
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
 
-      // 4th request should be denied
-      expect(await limiter.consume(userId)).toBe(false);
-      expect(await limiter.consume(userId)).toBe(false);
+      expect((await limiter.consume(userId)).allowed).toBe(false);
+      expect((await limiter.consume(userId)).allowed).toBe(false);
     });
 
     it("should isolate rate limits per user", async () => {
@@ -113,15 +324,13 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
 
       const limiter = new TokenBucketRateLimiter(config);
 
-      // User 1 exhausts their bucket
-      expect(await limiter.consume(user1)).toBe(true);
-      expect(await limiter.consume(user1)).toBe(true);
-      expect(await limiter.consume(user1)).toBe(false);
+      expect((await limiter.consume(user1)).allowed).toBe(true);
+      expect((await limiter.consume(user1)).allowed).toBe(true);
+      expect((await limiter.consume(user1)).allowed).toBe(false);
 
-      // User 2 should still have their full capacity
-      expect(await limiter.consume(user2)).toBe(true);
-      expect(await limiter.consume(user2)).toBe(true);
-      expect(await limiter.consume(user2)).toBe(false);
+      expect((await limiter.consume(user2)).allowed).toBe(true);
+      expect((await limiter.consume(user2)).allowed).toBe(true);
+      expect((await limiter.consume(user2)).allowed).toBe(false);
     });
   });
 
@@ -132,28 +341,23 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
 
       const config = {
         capacity: 5,
-        refillRate: 1, // 1 token per second
+        refillRate: 1,
         prefix: INTEGRATION_PREFIX,
         redisClient,
       };
 
       const limiter = new TokenBucketRateLimiter(config);
       
-      // Consume all 5 tokens
       for (let i = 0; i < 5; i++) {
         await limiter.consume(userId);
       }
-      expect(await limiter.consume(userId)).toBe(false); // Verify bucket is empty
+      expect((await limiter.consume(userId)).allowed).toBe(false);
 
-      // Wait 2 seconds (should refill 2 tokens)
       await new Promise(resolve => setTimeout(resolve, 2100));
 
-      // 2 requests should be allowed
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(true);
-
-      // 3rd request should be denied (0 tokens left)
-      expect(await limiter.consume(userId)).toBe(false);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(false);
     }, 10000);
 
     it("should refill tokens gradually with fractional refill rate", async () => {
@@ -162,25 +366,22 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
 
       const config = {
         capacity: 10,
-        refillRate: 0.5, // 0.5 tokens per second = 1 token every 2 seconds
+        refillRate: 0.5,
         prefix: INTEGRATION_PREFIX,
         redisClient,
       };
 
       const limiter = new TokenBucketRateLimiter(config);
       
-      // Consume all tokens
       for (let i = 0; i < 10; i++) {
         await limiter.consume(userId);
       }
-      expect(await limiter.consume(userId)).toBe(false);
+      expect((await limiter.consume(userId)).allowed).toBe(false);
 
-      // Wait 2 seconds (should refill 1 token: 2s * 0.5 tokens/s = 1 token)
       await new Promise(resolve => setTimeout(resolve, 2100));
 
-      // Exactly 1 request should be allowed
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(false);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(false);
     }, 10000);
 
     it("should not exceed capacity when refilling", async () => {
@@ -189,28 +390,25 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
 
       const config = {
         capacity: 5,
-        refillRate: 2, // 2 tokens per second
+        refillRate: 2,
         prefix: INTEGRATION_PREFIX,
         redisClient,
       };
 
       const limiter = new TokenBucketRateLimiter(config);
 
-      // Consume 3 tokens
       await limiter.consume(userId);
       await limiter.consume(userId);
       await limiter.consume(userId);
 
-      // Wait 5 seconds (should refill 10 tokens, but capped at capacity of 5)
       await new Promise(resolve => setTimeout(resolve, 5100));
 
-      // Should be able to consume exactly 5 tokens (not 10)
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(false);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(false);
     }, 10000);
   });
 
@@ -228,13 +426,11 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
 
       const limiter = new TokenBucketRateLimiter(config);
 
-      // Fire 20 concurrent requests
       const promises = Array(20).fill(null).map(() => limiter.consume(userId));
       const results = await Promise.all(promises);
 
-      // Exactly 10 should succeed (capacity), 10 should fail
-      const allowed = results.filter(r => r === true).length;
-      const denied = results.filter(r => r === false).length;
+      const allowed = results.filter((r: ConsumeResult) => r.allowed).length;
+      const denied = results.filter((r: ConsumeResult) => !r.allowed).length;
 
       expect(allowed).toBe(10);
       expect(denied).toBe(10);
@@ -251,12 +447,10 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
         redisClient,
       };
 
-      // Create 3 separate limiter instances
       const limiter1 = new TokenBucketRateLimiter(config);
       const limiter2 = new TokenBucketRateLimiter(config);
       const limiter3 = new TokenBucketRateLimiter(config);
 
-      // Each limiter consumes tokens concurrently
       const results = await Promise.all([
         limiter1.consume(userId),
         limiter2.consume(userId),
@@ -266,9 +460,110 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
         limiter3.consume(userId),
       ]);
 
-      // Should allow exactly 5 requests total across all limiters
-      const allowed = results.filter(r => r === true).length;
+      const allowed = results.filter((r: ConsumeResult) => r.allowed).length;
       expect(allowed).toBe(5);
+    });
+  });
+
+  describe("TTL and Expiration", () => {
+    it("should set TTL on Redis keys", async () => {
+      const userId = "ttl-test-user";
+      trackKey(userId);
+
+      const limiter = new TokenBucketRateLimiter({
+        capacity: 10,
+        refillRate: 1,
+        prefix: INTEGRATION_PREFIX,
+        redisClient,
+        ttlSeconds: 60,
+      });
+
+      await limiter.consume(userId);
+
+      const key = `${INTEGRATION_PREFIX}:${userId}`;
+      const ttl = await redisClient.ttl(key);
+      
+      expect(ttl).toBeGreaterThan(0);
+      expect(ttl).toBeLessThanOrEqual(60);
+    });
+
+    it("should auto-calculate TTL when not provided", async () => {
+      const userId = "ttl-auto-user";
+      trackKey(userId);
+
+      const limiter = new TokenBucketRateLimiter({
+        capacity: 10,
+        refillRate: 1,
+        prefix: INTEGRATION_PREFIX,
+        redisClient,
+      });
+
+      await limiter.consume(userId);
+
+      const key = `${INTEGRATION_PREFIX}:${userId}`;
+      const ttl = await redisClient.ttl(key);
+      
+      expect(ttl).toBeGreaterThan(0);
+    });
+
+    it("should use default TTL for zero refill rate", async () => {
+      const userId = "ttl-zero-refill";
+      trackKey(userId);
+
+      const limiter = new TokenBucketRateLimiter({
+        capacity: 10,
+        refillRate: 0,
+        prefix: INTEGRATION_PREFIX,
+        redisClient,
+      });
+
+      await limiter.consume(userId);
+
+      const key = `${INTEGRATION_PREFIX}:${userId}`;
+      const ttl = await redisClient.ttl(key);
+      
+      expect(ttl).toBeGreaterThan(0);
+    });
+  });
+
+  describe("Error Handling", () => {
+    it("should handle Redis script errors gracefully", async () => {
+      const userId = "error-test-user";
+      trackKey(userId);
+
+      // Create a limiter with a mock client that fails
+      const failingClient = {
+        ...redisClient,
+        evalSha: jest.fn(() => Promise.reject(new Error('Redis connection failed'))),
+        scriptLoad: jest.fn(() => Promise.reject(new Error('Redis connection failed'))),
+      } as any;
+
+      const limiter = new TokenBucketRateLimiter({
+        capacity: 10,
+        refillRate: 1,
+        prefix: INTEGRATION_PREFIX,
+        redisClient: failingClient,
+      });
+
+      await expect(limiter.consume(userId)).rejects.toThrow(RateLimiterError);
+    });
+
+    it("should handle Redis disconnection gracefully", async () => {
+      const userId = "disconnect-test-user";
+      
+      // Create a disconnected client
+      const disconnectedClient = createClient({
+        url: "redis://localhost:9999",
+      }) as RedisClientType;
+
+      const limiter = new TokenBucketRateLimiter({
+        capacity: 10,
+        refillRate: 1,
+        prefix: INTEGRATION_PREFIX,
+        redisClient: disconnectedClient,
+      });
+
+      await expect(limiter.consume(userId)).rejects.toThrow();
     });
   });
 
@@ -279,43 +574,40 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
 
       const config = {
         capacity: 100,
-        refillRate: 10, // 10 tokens per second
+        refillRate: 10,
         prefix: INTEGRATION_PREFIX,
         redisClient,
       };
 
       const limiter = new TokenBucketRateLimiter(config);
 
-      // Consume all 100 tokens rapidly
       const results = await Promise.all(
         Array(100).fill(null).map(() => limiter.consume(userId))
       );
 
-      expect(results.filter(r => r === true).length).toBe(100);
-      expect(await limiter.consume(userId)).toBe(false);
+      expect(results.filter((r: ConsumeResult) => r.allowed).length).toBe(100);
+      expect((await limiter.consume(userId)).allowed).toBe(false);
     });
 
-    it("should support very low rate limiting (1 request per 10 seconds)", async () => {
+    it("should support very low rate limiting", async () => {
       const userId = "slow-rate-user";
       trackKey(userId);
 
       const config = {
         capacity: 2,
-        refillRate: 0.1, // 0.1 tokens per second = 1 token per 10 seconds
+        refillRate: 0.1,
         prefix: INTEGRATION_PREFIX,
         redisClient,
       };
 
       const limiter = new TokenBucketRateLimiter(config);
 
-      // Consume initial capacity
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(false);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(false);
 
-      // Wait 1 second (should refill 0.1 tokens, not enough for 1 request)
       await new Promise(resolve => setTimeout(resolve, 1100));
-      expect(await limiter.consume(userId)).toBe(false);
+      expect((await limiter.consume(userId)).allowed).toBe(false);
     }, 10000);
 
     it("should work with different prefixes independently", async () => {
@@ -341,17 +633,15 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
       const limiter1 = new TokenBucketRateLimiter(config1);
       const limiter2 = new TokenBucketRateLimiter(config2);
 
-      // Exhaust limiter1
       await limiter1.consume(userId);
       await limiter1.consume(userId);
       await limiter1.consume(userId);
-      expect(await limiter1.consume(userId)).toBe(false);
+      expect((await limiter1.consume(userId)).allowed).toBe(false);
 
-      // limiter2 should still have full capacity
-      expect(await limiter2.consume(userId)).toBe(true);
-      expect(await limiter2.consume(userId)).toBe(true);
-      expect(await limiter2.consume(userId)).toBe(true);
-      expect(await limiter2.consume(userId)).toBe(false);
+      expect((await limiter2.consume(userId)).allowed).toBe(true);
+      expect((await limiter2.consume(userId)).allowed).toBe(true);
+      expect((await limiter2.consume(userId)).allowed).toBe(true);
+      expect((await limiter2.consume(userId)).allowed).toBe(false);
     });
   });
 
@@ -369,13 +659,11 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
 
       const limiter = new TokenBucketRateLimiter(config);
 
-      // Make multiple consume calls
       await limiter.consume(userId);
       await limiter.consume(userId);
       await limiter.consume(userId);
 
-      // All calls should succeed without script loading errors
-      expect(await limiter.consume(userId)).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
     });
 
     it("should handle multiple limiter instances sharing same Redis client", async () => {
@@ -401,9 +689,8 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
       const limiter1 = new TokenBucketRateLimiter(config1);
       const limiter2 = new TokenBucketRateLimiter(config2);
 
-      // Both limiters should work independently
-      expect(await limiter1.consume(user1)).toBe(true);
-      expect(await limiter2.consume(user2)).toBe(true);
+      expect((await limiter1.consume(user1)).allowed).toBe(true);
+      expect((await limiter2.consume(user2)).allowed).toBe(true);
     });
   });
 
@@ -421,8 +708,7 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
 
       const limiter = new TokenBucketRateLimiter(config);
 
-      // First request on a fresh key should be allowed (bucket initializes to capacity)
-      expect(await limiter.consume(userId)).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
     });
 
     it("should handle special characters in client ID", async () => {
@@ -438,10 +724,10 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
 
       const limiter = new TokenBucketRateLimiter(config);
 
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(true);
-      expect(await limiter.consume(userId)).toBe(false);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(true);
+      expect((await limiter.consume(userId)).allowed).toBe(false);
     });
 
     it("should handle rapid sequential requests", async () => {
@@ -457,13 +743,11 @@ describe("TokenBucketRateLimiter Integration Tests (Real Redis)", () => {
 
       const limiter = new TokenBucketRateLimiter(config);
 
-      // Make 20 rapid sequential requests
       for (let i = 0; i < 20; i++) {
-        expect(await limiter.consume(userId)).toBe(true);
+        expect((await limiter.consume(userId)).allowed).toBe(true);
       }
 
-      // 21st should fail
-      expect(await limiter.consume(userId)).toBe(false);
+      expect((await limiter.consume(userId)).allowed).toBe(false);
     });
   });
 });
