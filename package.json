@@ -1,18 +1,42 @@
 {
-  "name": "rate-limiter",
+  "name": "@gratheon/rate-limiter",
   "version": "1.0.0",
-  "description": "",
+  "description": "High-performance distributed rate limiting library using Token Bucket algorithm with Redis",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "jest",
     "test:unit": "jest --testPathIgnorePatterns=integration",
     "test:integration": "jest --testPathPatterns=integration",
-    "build": "tsc"
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "rate-limiter",
+    "rate-limiting",
+    "token-bucket",
+    "redis",
+    "distributed",
+    "express",
+    "middleware",
+    "throttling",
+    "gratheon"
+  ],
+  "author": "Gratheon",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gratheon/rate-limiter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gratheon/rate-limiter/issues"
+  },
+  "homepage": "https://github.com/gratheon/rate-limiter#readme",
   "dependencies": {
     "redis": "^5.10.0"
   },
