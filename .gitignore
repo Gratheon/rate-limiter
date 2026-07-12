@@ -11,6 +11,7 @@ dist/
 .idea/
 *.swp
 *.swo
+.dccache
 
 # OS
 .DS_Store
