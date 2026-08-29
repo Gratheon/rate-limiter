@@ -86,8 +86,8 @@ export REDIS_URL=redis://:mypassword@localhost:6379
 ```
 
 **Default Configuration:**
-- URL: `redis://:pass@localhost:5200`
-- This matches the gratheon development environment
+- URL: `redis://localhost:6379`
+- Set `REDIS_URL` environment variable to override (e.g., `redis://:pass@localhost:5200` for gratheon dev environment)
 
 ### Option 3: Local Redis Installation
 

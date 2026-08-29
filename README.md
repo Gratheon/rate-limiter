@@ -4,59 +4,217 @@ A high-performance, distributed rate limiting library for TypeScript/Node.js app
 
 This library is designed to be integrated into various services within the `gratheon` ecosystem (e.g., `graphql-router`, `telemetry-api`, etc.) to control traffic flow and prevent abuse.
 
+## Features
+
+- **Token Bucket Algorithm**: Allows bursts while maintaining steady-state rate limits
+- **Atomic Operations**: Uses Redis Lua scripts for thread-safe, distributed rate limiting
+- **Express Middleware**: Built-in middleware with standardized rate limit headers
+- **Enhanced API**: Get status, batch consume, reset buckets, and detailed response info
+- **TTL Management**: Automatic key expiration to prevent Redis memory buildup
+- **Input Validation**: Validates all configuration parameters
+- **Error Handling**: Graceful degradation when Redis is unavailable
+- **Comprehensive Testing**: Unit and integration test coverage
+
 ## Algorithm: Token Bucket
 
 - **Allows Bursts:** Tokens accumulate during low-traffic periods, enabling high burst capacity when needed.
 - **Atomic Operation:** Uses Redis Lua scripts to ensure read, calculation, and write-back occur in a single atomic step, which is essential for accuracy in horizontally scaled (distributed) applications.
 
-## Architecture & Flow
+## Installation
 
-### Sequence Diagram
+```bash
+npm install @gratheon/rate-limiter redis
 
-The following diagram shows how the rate limiter integrates into a typical API service flow:
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API as API Service<br/>(Express/Fastify)
-    participant RL as TokenBucketRateLimiter
-    participant Redis
-
-    Note over Client,Redis: First Request (Script Loading)
-    Client->>API: HTTP Request<br/>POST /api/data<br/>Header: user-id: 123
-    API->>RL: consume("user:123")
-    RL->>Redis: SCRIPT LOAD<br/>(Lua token bucket script)
-    Redis-->>RL: sha1 hash
-    RL->>Redis: EVALSHA sha1<br/>key: "rate:user:123"<br/>capacity: 10<br/>refillRate: 0.166<br/>timestamp: 1678886400
-    Redis->>Redis: Atomically check &<br/>decrement token
-    Redis-->>RL: [1, 9]<br/>(allowed, remaining)
-    RL-->>API: true
-    API->>API: Process business logic
-    API-->>Client: 200 OK<br/>X-RateLimit-Remaining: 9
-
-    Note over Client,Redis: Subsequent Requests
-    Client->>API: HTTP Request #2<br/>same user
-    API->>RL: consume("user:123")
-    RL->>Redis: EVALSHA sha1<br/>(script already cached)
-    Redis-->>RL: [1, 8]
-    RL-->>API: true
-    API-->>Client: 200 OK
-
-    Note over Client,Redis: Rate Limit Exceeded
-    loop 8 more requests
-        Client->>API: Requests #3-10
-        API->>RL: consume()
-        RL->>Redis: EVALSHA
-        Redis-->>RL: [1, remaining]
-        RL-->>API: true
-    end
-    Client->>API: Request #11<br/>(bucket empty)
-    API->>RL: consume("user:123")
-    RL->>Redis: EVALSHA sha1
-    Redis-->>RL: [0, 0]<br/>(denied, 0 remaining)
-    RL-->>API: false
-    API-->>Client: 429 Too Many Requests<br/>Retry-After: 6
+# Optional: For Express middleware support
+npm install express
 ```
+
+## Usage
+
+### Basic Usage
+
+```typescript
+import { createClient } from 'redis';
+import { TokenBucketRateLimiter } from '@gratheon/rate-limiter';
+
+const redisClient = createClient({ url: 'redis://localhost:6379' });
+await redisClient.connect();
+
+const limiter = new TokenBucketRateLimiter({
+  redisClient,
+  capacity: 10,        // 10 requests burst capacity
+  refillRate: 1,       // 1 token per second
+  prefix: 'api:user',
+  ttlSeconds: 600,     // Optional: key TTL (auto-calculated if not provided)
+});
+
+// Consume a token
+const result = await limiter.consume('user123');
+if (!result.allowed) {
+  console.log(`Rate limited! Retry after ${result.retryAfter} seconds`);
+}
+```
+
+### Enhanced API
+
+#### Consume with Detailed Response
+
+```typescript
+const result = await limiter.consume('user123');
+// Returns: { allowed: boolean, remainingTokens: number, retryAfter?: number }
+
+console.log(result.allowed);        // true/false
+console.log(result.remainingTokens); // 9 (after consuming 1 from capacity 10)
+console.log(result.retryAfter);      // undefined if allowed, seconds if denied
+```
+
+#### Get Bucket Status (without consuming)
+
+```typescript
+const status = await limiter.getStatus('user123');
+// Returns: { remainingTokens: number, capacity: number, resetTime?: Date }
+
+console.log(status.remainingTokens); // Current available tokens
+console.log(status.capacity);        // Maximum capacity
+console.log(status.resetTime);       // When bucket will be full again
+```
+
+#### Batch Consume Multiple Tokens
+
+```typescript
+const result = await limiter.consumeBatch('user123', 5);
+// Consumes 5 tokens at once
+
+if (result.allowed) {
+  console.log(`Consumed 5 tokens, ${result.remainingTokens} remaining`);
+}
+```
+
+#### Reset/Clear Bucket
+
+```typescript
+const wasDeleted = await limiter.reset('user123');
+// Removes rate limit data for user, returns true if key existed
+```
+
+### Express Middleware
+
+```typescript
+import express from 'express';
+import { createRateLimitMiddleware, createRateLimitStatusMiddleware } from '@gratheon/rate-limiter';
+
+const app = express();
+
+// Basic rate limiting by IP
+app.use(createRateLimitMiddleware(limiter));
+
+// Rate limiting by user ID (with custom options)
+app.use('/api/protected', createRateLimitMiddleware(limiter, {
+  keyGenerator: (req) => req.user?.id || req.ip,
+  capacity: 50,
+  refillRate: 5,
+  skip: (req) => req.path === '/health',  // Skip health checks
+}));
+
+// Custom rate limit exceeded handler
+app.use(createRateLimitMiddleware(limiter, {
+  onLimitReached: (req, res, next, result) => {
+    res.status(429).json({
+      error: 'Rate limit exceeded',
+      retryAfter: result.retryAfter,
+    });
+  },
+}));
+
+// Rate limit status endpoint
+app.get('/api/rate-limit-status', createRateLimitStatusMiddleware(limiter), (req, res) => {
+  res.json({
+    limit: req.rateLimitStatus.capacity,
+    remaining: req.rateLimitStatus.remainingTokens,
+    resetTime: req.rateLimitStatus.resetTime,
+  });
+});
+```
+
+### Middleware Response Headers
+
+The middleware automatically adds these headers:
+
+- `X-RateLimit-Limit`: Maximum requests allowed
+- `X-RateLimit-Remaining`: Remaining requests in current window
+- `X-RateLimit-Reset`: Unix timestamp when bucket resets (status middleware)
+- `Retry-After`: Seconds to wait before retry (when rate limited)
+
+### Error Handling
+
+The rate limiter validates all configuration and provides detailed errors:
+
+```typescript
+import { RateLimiterError } from '@gratheon/rate-limiter';
+
+try {
+  const limiter = new TokenBucketRateLimiter({
+    capacity: -5,  // Invalid: throws RateLimiterError
+    refillRate: 1,
+    prefix: 'api',
+    redisClient,
+  });
+} catch (error) {
+  if (error instanceof RateLimiterError) {
+    console.error('Configuration error:', error.message);
+  }
+}
+```
+
+The Express middleware fails open (allows requests) when Redis is unavailable, ensuring your service remains available even if the rate limiter encounters issues.
+
+## Configuration Options
+
+### RateLimiterConfig
+
+| Option | Type | Required | Description |
+|--------|------|----------|-------------|
+| `redisClient` | RedisClientType | Yes | Connected Redis client |
+| `capacity` | number | Yes | Maximum tokens in bucket |
+| `refillRate` | number | Yes | Tokens added per second |
+| `prefix` | string | Yes | Redis key prefix |
+| `ttlSeconds` | number | No | Key TTL (auto-calculated if omitted) |
+
+### ExpressMiddlewareConfig
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `keyGenerator` | function | `req.ip` | Extract client identifier from request |
+| `skip` | function | - | Skip rate limiting for certain requests |
+| `onLimitReached` | function | - | Custom handler for rate limit exceeded |
+| `includeHeaders` | boolean | `true` | Include rate limit headers |
+| `headers` | object | - | Custom header names |
+
+## Running Tests
+
+### Unit Tests
+
+```bash
+npm run test:unit
+```
+
+### Integration Tests (requires Redis)
+
+```bash
+# Start Redis
+docker run -d -p 6379:6379 redis:latest
+
+# Run tests
+npm run test:integration
+```
+
+### All Tests
+
+```bash
+npm test
+```
+
+## Architecture
 
 ### Token Bucket State Flow
 
@@ -71,129 +229,43 @@ stateDiagram-v2
     ExecuteScript --> Allowed: tokens > 0
     ExecuteScript --> Denied: tokens = 0
     
-    Allowed --> [*]: return true
-    Denied --> [*]: return false
-    
-    note right of LoadScript
-        Lua script loaded once
-        per Redis connection
-    end note
-    
-    note right of ExecuteScript
-        Atomic operation:
-        1. Get current tokens
-        2. Calculate refills
-        3. Check availability
-        4. Decrement if allowed
-    end note
+    Allowed --> [*]: return { allowed: true, remainingTokens: n }
+    Denied --> [*]: return { allowed: false, retryAfter: n }
 ```
 
-## Installation
+### Redis Key Structure
 
-```bash
-npm install @gratheon/rate-limiter redis
-```
+Keys are stored as Redis Hashes with the following structure:
+- `tokens`: Current available tokens
+- `timestamp`: Last refill timestamp
 
-*(Note: The actual package name may need to be scoped to `@gratheon/rate-limiter` upon publishing.)*
+Keys have an automatic TTL to prevent memory buildup.
 
-## Running Tests
+## API Reference
 
-First, install development dependencies:
+### TokenBucketRateLimiter
 
-```bash
-npm install
-```
-
-### Unit Tests
-
-Unit tests use mocked Redis clients and run quickly without external dependencies:
-
-```bash
-npm run test:unit
-```
-
-### Integration Tests
-
-Integration tests require a **running Redis instance**. 
-
-**Start Redis** (using Docker):
-
-```bash
-# Without password
-docker run -d -p 6379:6379 redis:latest
-
-# With password
-docker run -d -p 6379:6379 redis:latest redis-server --requirepass mypassword
-```
-
-Or use an existing Redis instance by setting the `REDIS_URL` environment variable:
-
-```bash
-# Without password
-export REDIS_URL=redis://localhost:6379
-
-# With password
-export REDIS_URL=redis://:mypassword@localhost:6379
-```
-
-**Run integration tests:**
-
-```bash
-npm run test:integration
-```
-
-The default Redis URL is `redis://:pass@localhost:5200` (matches the gratheon development environment).
-
-### All Tests
-
-Run both unit and integration tests:
-
-```bash
-npm test
-```
-
-## Usage
-
-### Initialization
-
-First, you need a connected Redis client.
+#### Constructor
 
 ```typescript
-import { createClient } from 'redis';
-import { TokenBucketRateLimiter } from './src/TokenBucketRateLimiter'; // or '@gratheon/rate-limiter'
-
-const redisClient = createClient({
-  url: 'redis://localhost:6379'
-});
-
-await redisClient.connect();
-
-const rateLimiter = new TokenBucketRateLimiter({
-  redisClient: redisClient,
-  // 5 requests per minute, with a burst capacity of 10
-  capacity: 10,
-  refillRate: 10 / 60, // 0.166 tokens per second (10 tokens / 60 seconds)
-  prefix: 'api:user' // Prefix for Redis keys (e.g., api:user:123)
-});
+new TokenBucketRateLimiter(config: RateLimiterConfig)
 ```
 
-### Consuming a Token
+Validates configuration and throws `RateLimiterError` for invalid parameters.
 
-Use the `consume` method inside your middleware or route handler.
+#### Methods
 
-```typescript
-async function handleRequest(userId: string): Promise<Response> {
-  const allowed = await rateLimiter.consume(userId);
+- `consume(clientId: string): Promise<ConsumeResult>` - Consume one token
+- `consumeBatch(clientId: string, tokens: number): Promise<ConsumeResult>` - Consume multiple tokens
+- `getStatus(clientId: string): Promise<BucketStatus>` - Get bucket status without consuming
+- `reset(clientId: string): Promise<boolean>` - Clear bucket for client
+- `getConfig(): Readonly<RateLimiterConfig>` - Get configuration
 
-  if (!allowed) {
-    return new Response('Rate Limit Exceeded', { 
-      status: 429,
-      headers: { 'Retry-After': '5' } // Inform client when to retry (in seconds)
-    });
-  }
+### Express Middleware
 
-  // Proceed with request logic
-  // ...
-  return new Response('OK');
-}
-```
+- `createRateLimitMiddleware(limiter, config?)` - Rate limiting middleware
+- `createRateLimitStatusMiddleware(limiter, config?)` - Status middleware
+
+## License
+
+ISC

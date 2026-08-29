@@ -1,0 +1,48 @@
+# Source files (we only want dist/)
+src/
+tsconfig.json
+jest.config.js
+
+# Tests
+*.test.ts
+*.spec.ts
+__tests__/
+coverage/
+.nyc_output/
+
+# Development
+node_modules/
+.env
+.env.local
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# CI/CD
+.github/
+
+# Docker
+docker-compose*.yml
+Dockerfile*
+
+# Documentation (keep README and LICENSE)
+TESTING.md
+IMPROVEMENTS.md
+
+# Build artifacts (keep dist/)
+*.js.map
+*.d.ts.map
